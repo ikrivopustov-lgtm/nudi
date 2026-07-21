@@ -67,6 +67,15 @@ def update_task(task_id: int, **fields) -> Task | None:
         return task
 
 
+def delete_task(task_id: int) -> bool:
+    with session_scope() as s:
+        task = s.get(Task, task_id)
+        if task is None:
+            return False
+        s.delete(task)
+        return True
+
+
 def list_by_status(status: str) -> list[Task]:
     with session_scope() as s:
         return list(s.exec(select(Task).where(Task.status == status)))
