@@ -57,7 +57,9 @@ def init_db() -> None:
 @contextmanager
 def session_scope() -> Iterator[Session]:
     """Transactional session: commit on success, rollback on error."""
-    session = Session(get_engine())
+    # expire_on_commit=False: keep attributes readable after the session closes,
+    # so callers can snapshot a just-created/updated Task (no relationships here).
+    session = Session(get_engine(), expire_on_commit=False)
     try:
         yield session
         session.commit()
