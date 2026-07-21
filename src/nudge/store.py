@@ -81,6 +81,12 @@ def list_by_status(status: str) -> list[Task]:
         return list(s.exec(select(Task).where(Task.status == status)))
 
 
+def list_active() -> list[Task]:
+    """All tasks that aren't done — candidates for NL edits."""
+    with session_scope() as s:
+        return list(s.exec(select(Task).where(Task.status != "done")))
+
+
 def count_by_status(status: str) -> int:
     with session_scope() as s:
         return len(list(s.exec(select(Task).where(Task.status == status))))
