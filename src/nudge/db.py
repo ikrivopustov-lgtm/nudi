@@ -49,9 +49,33 @@ def get_engine() -> Engine:
     return _engine
 
 
+# Columns added to Task after the first release. create_all() won't ALTER an
+# existing table, so we add any missing ones by hand (idempotent).
+_TASK_ADDED_COLUMNS = {
+    "remind_at": "DATETIME",
+    "recurrence": "VARCHAR",
+    "completed_at": "DATETIME",
+}
+
+
+def _migrate(engine: Engine) -> None:
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    if "task" not in insp.get_table_names():
+        return
+    existing = {c["name"] for c in insp.get_columns("task")}
+    with engine.begin() as conn:
+        for name, sqltype in _TASK_ADDED_COLUMNS.items():
+            if name not in existing:
+                conn.execute(text(f"ALTER TABLE task ADD COLUMN {name} {sqltype}"))
+
+
 def init_db() -> None:
-    """Create tables if missing. Idempotent."""
-    SQLModel.metadata.create_all(get_engine())
+    """Create missing tables, then add any missing Task columns. Idempotent."""
+    engine = get_engine()
+    _migrate(engine)  # add columns to a pre-existing task table before create_all
+    SQLModel.metadata.create_all(engine)
 
 
 @contextmanager

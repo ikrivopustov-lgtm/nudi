@@ -16,6 +16,7 @@ from telegram.ext import (
 
 from datetime import time as dtime
 
+from . import store
 from .airtable_sync import airtable_sync_job, is_configured
 from .config import get_settings
 from .db import init_db
@@ -32,7 +33,7 @@ def _configure_logging() -> None:
 
 
 async def _post_init(app: Application) -> None:
-    """Publish the '/' menu shown next to the Telegram input field."""
+    """Publish the '/' menu and re-arm reminders that outlived a restart."""
     await app.bot.set_my_commands(
         [
             BotCommand("today", "Что делать сегодня (максимум 5)"),
@@ -41,6 +42,18 @@ async def _post_init(app: Application) -> None:
             BotCommand("start", "Показать кнопки"),
         ]
     )
+    from datetime import datetime, timezone
+
+    from .digest import reminder_job
+
+    now = datetime.now(timezone.utc)
+    for task in store.tasks_with_future_reminders(now):
+        when = task.remind_at
+        if when.tzinfo is None:  # SQLite returns naive; the stored value is UTC
+            when = when.replace(tzinfo=timezone.utc)
+        app.job_queue.run_once(
+            reminder_job, when=when, data=task.id, name=f"reminder:{task.id}"
+        )
 
 
 def build_application() -> Application:

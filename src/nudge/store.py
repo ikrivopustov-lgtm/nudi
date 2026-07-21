@@ -6,12 +6,13 @@ are safe to read after the call (see expire_on_commit in db.session_scope).
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+import json
+from datetime import date, datetime, timedelta, timezone
 
 from sqlmodel import select
 
 from .db import session_scope
-from .models import Setting, Task
+from .models import ActionLog, ConvTurn, Setting, Task
 
 
 def _now() -> datetime:
@@ -28,6 +29,8 @@ def create_task(
     status: str = "inbox",
     due_date: date | None = None,
     scheduled_for: date | None = None,
+    remind_at: datetime | None = None,
+    recurrence: str | None = None,
     source: str = "tg",
     airtable_id: str | None = None,
 ) -> Task:
@@ -40,6 +43,8 @@ def create_task(
         status=status,
         due_date=due_date,
         scheduled_for=scheduled_for,
+        remind_at=remind_at,
+        recurrence=recurrence,
         source=source,
         airtable_id=airtable_id,
     )
@@ -98,6 +103,134 @@ def list_active() -> list[Task]:
 def count_by_status(status: str) -> int:
     with session_scope() as s:
         return len(list(s.exec(select(Task).where(Task.status == status))))
+
+
+def search_tasks(query: str, *, include_done: bool = False) -> list[Task]:
+    """Substring search over title/project/raw_text."""
+    q = f"%{query.lower()}%"
+    with session_scope() as s:
+        stmt = select(Task)
+        if not include_done:
+            stmt = stmt.where(Task.status != "done")
+        rows = list(s.exec(stmt))
+    return [
+        t for t in rows
+        if query.lower() in f"{t.title} {t.project or ''} {t.raw_text}".lower()
+    ]
+
+
+def completed_since(since: datetime) -> list[Task]:
+    with session_scope() as s:
+        return list(
+            s.exec(select(Task).where(Task.completed_at.is_not(None), Task.completed_at >= since))
+        )
+
+
+# --- reminders -------------------------------------------------------------
+
+def tasks_with_future_reminders(now: datetime) -> list[Task]:
+    now = now.replace(tzinfo=None)  # remind_at is stored naive-UTC
+    with session_scope() as s:
+        return list(
+            s.exec(select(Task).where(Task.remind_at.is_not(None), Task.remind_at > now))
+        )
+
+
+# --- conversation memory ---------------------------------------------------
+
+def add_turn(role: str, content: str, *, keep: int = 24) -> None:
+    """Append a turn and prune to the most recent `keep`."""
+    with session_scope() as s:
+        s.add(ConvTurn(role=role, content=content))
+        s.flush()
+        rows = list(s.exec(select(ConvTurn).order_by(ConvTurn.id.desc())))
+        for old in rows[keep:]:
+            s.delete(old)
+
+
+def recent_turns(limit: int = 12) -> list[tuple[str, str]]:
+    """Return the last `limit` turns oldest-first as (role, content)."""
+    with session_scope() as s:
+        rows = list(s.exec(select(ConvTurn).order_by(ConvTurn.id.desc()).limit(limit)))
+    rows.reverse()
+    return [(r.role, r.content) for r in rows]
+
+
+# --- undo / action journal -------------------------------------------------
+
+_SNAPSHOT_FIELDS = (
+    "title", "raw_text", "project", "iso_week", "priority", "status",
+    "due_date", "scheduled_for", "remind_at", "recurrence", "completed_at",
+    "source", "airtable_id",
+)
+
+
+def snapshot(task: Task) -> str:
+    data = {}
+    for f in _SNAPSHOT_FIELDS:
+        v = getattr(task, f)
+        if isinstance(v, (date, datetime)):
+            v = v.isoformat()
+        data[f] = v
+    data["id"] = task.id
+    return json.dumps(data, ensure_ascii=False)
+
+
+def log_action(kind: str, *, task_id: int | None, before: str | None, summary: str) -> None:
+    with session_scope() as s:
+        s.add(ActionLog(kind=kind, task_id=task_id, before=before, summary=summary))
+
+
+def last_undoable() -> ActionLog | None:
+    with session_scope() as s:
+        return s.exec(
+            select(ActionLog).where(ActionLog.undone == False).order_by(ActionLog.id.desc())  # noqa: E712
+        ).first()
+
+
+def _mark_undone(log_id: int) -> None:
+    with session_scope() as s:
+        row = s.get(ActionLog, log_id)
+        if row is not None:
+            row.undone = True
+            s.add(row)
+
+
+def _coerce(field: str, value):
+    if value is None:
+        return None
+    if field in ("due_date", "scheduled_for"):
+        return date.fromisoformat(value)
+    if field in ("remind_at", "completed_at"):
+        return datetime.fromisoformat(value)
+    return value
+
+
+def undo_last() -> str | None:
+    """Reverse the most recent action. Returns a human summary, or None if nothing to undo."""
+    log = last_undoable()
+    if log is None:
+        return None
+
+    if log.kind == "create" and log.task_id is not None:
+        delete_task(log.task_id)
+    elif log.kind == "delete" and log.before:
+        data = json.loads(log.before)
+        with session_scope() as s:
+            task = Task(**{f: _coerce(f, data.get(f)) for f in _SNAPSHOT_FIELDS})
+            task.id = data.get("id")
+            s.add(task)
+    elif log.kind == "update" and log.before and log.task_id is not None:
+        data = json.loads(log.before)
+        with session_scope() as s:
+            task = s.get(Task, log.task_id)
+            if task is not None:
+                for f in _SNAPSHOT_FIELDS:
+                    setattr(task, f, _coerce(f, data.get(f)))
+                s.add(task)
+
+    _mark_undone(log.id)
+    return log.summary
 
 
 # --- Airtable mirroring support -------------------------------------------
