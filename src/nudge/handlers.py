@@ -39,7 +39,7 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
 )
 
 HELP_TEXT = (
-    "<b>nudge</b> — ловлю задачи и не даю списку разрастись.\n\n"
+    "<b>Nudi</b> — ловлю задачи и не даю списку разрастись.\n\n"
     "<b>Как добавить</b>\n"
     "Просто напиши текстом: «оплатить налоги до 25 июля». Разберу на заголовок, "
     "проект, приоритет и дедлайн. Пересланное сообщение тоже станет задачей.\n\n"
@@ -180,7 +180,7 @@ async def _send_confirmation(update: Update, task: Task) -> None:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     name = get_settings().owner_name
     await update.effective_message.reply_text(
-        f"nudge на связи, {name}. Кидай задачу текстом — разберу и добавлю.\n"
+        f"Nudi на связи, {name}. Кидай задачу текстом — разберу и добавлю.\n"
         "Кнопки снизу: список на сегодня, разбор инбокса, справка.",
         reply_markup=MAIN_KEYBOARD,
     )
