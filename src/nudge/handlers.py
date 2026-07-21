@@ -7,7 +7,12 @@ import logging
 from collections.abc import Awaitable, Callable
 from datetime import date, datetime
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    Update,
+)
 from telegram.ext import ContextTypes
 
 from . import store
@@ -20,6 +25,37 @@ log = logging.getLogger(__name__)
 Handler = Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]
 
 _PENDING_PROJECT = "await_project_for"  # user_data key: task id awaiting a project name
+
+# Persistent keyboard. These exact strings are intercepted in on_text BEFORE
+# capture, so pressing a button never creates a task.
+BTN_TODAY = "☀️ Сегодня"
+BTN_BACKLOG = "📋 Бэклог"
+BTN_HELP = "❓ Помощь"
+
+MAIN_KEYBOARD = ReplyKeyboardMarkup(
+    [[BTN_TODAY, BTN_BACKLOG], [BTN_HELP]],
+    resize_keyboard=True,
+    is_persistent=True,
+)
+
+HELP_TEXT = (
+    "<b>nudge</b> — ловлю задачи и не даю списку разрастись.\n\n"
+    "<b>Как добавить</b>\n"
+    "Просто напиши текстом: «оплатить налоги до 25 июля». Разберу на заголовок, "
+    "проект, приоритет и дедлайн. Пересланное сообщение тоже станет задачей.\n\n"
+    "<b>Как править — тоже текстом</b>\n"
+    "• «сделал налоги» → закрою\n"
+    "• «сдвинь звонок на пятницу» → перенесу\n"
+    "• «подними приоритет по стоматологу» → сменю приоритет\n\n"
+    "<b>Команды</b>\n"
+    "/today — что делать сегодня (максимум 5)\n"
+    "/backlog — разобрать инбокс кнопками\n"
+    "/help — это сообщение\n\n"
+    "<b>Сам напомню</b>\n"
+    "Утром в 08:30 пришлю список на день, в воскресенье в 19:00 — разбор инбокса.\n\n"
+    "⚠️ Учти: я считаю задачей <i>любой</i> текст. Вопросы задавай кнопками и "
+    "командами, иначе вопрос осядет задачей."
+)
 
 
 def restricted(func: Handler) -> Handler:
@@ -144,9 +180,59 @@ async def _send_confirmation(update: Update, task: Task) -> None:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     name = get_settings().owner_name
     await update.effective_message.reply_text(
-        f"nudge на связи, {name}. Кидай задачу текстом — разберу и добавлю. "
-        "Пересланные сообщения тоже ловлю."
+        f"nudge на связи, {name}. Кидай задачу текстом — разберу и добавлю.\n"
+        "Кнопки снизу: список на сегодня, разбор инбокса, справка.",
+        reply_markup=MAIN_KEYBOARD,
     )
+
+
+@restricted
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.effective_message.reply_text(
+        HELP_TEXT, parse_mode="HTML", reply_markup=MAIN_KEYBOARD
+    )
+
+
+@restricted
+async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    from .digest import render_digest
+    from .priority import select_today
+
+    today = local_today()
+    tasks = select_today(today)
+    active = len(store.list_active())
+    text = render_digest(tasks, today)
+    if active > len(tasks):
+        text += f"\n\n<i>ещё {active - len(tasks)} в очереди — покажу, когда разгрузишь</i>"
+    await update.effective_message.reply_text(text, parse_mode="HTML")
+
+
+@restricted
+async def cmd_backlog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    from .digest import WEEKLY_TRIAGE_CAP, triage_keyboard
+
+    message = update.effective_message
+    inbox = store.list_by_status("inbox")
+    someday = store.count_by_status("someday")
+
+    if not inbox:
+        tail = f"\nВ «когда-нибудь» лежит: {someday}." if someday else ""
+        await message.reply_text(f"📋 Инбокс пуст. Чисто.{tail}")
+        return
+
+    tail = f" · в «когда-нибудь»: {someday}" if someday else ""
+    await message.reply_text(
+        f"📋 <b>Инбокс</b>: {len(inbox)}{tail}. Разложим:", parse_mode="HTML"
+    )
+    for t in inbox[:WEEKLY_TRIAGE_CAP]:
+        proj = f" · {_esc(t.project)}" if t.project else ""
+        await message.reply_text(
+            f"[{t.priority}] {_esc(t.title)}{proj}",
+            reply_markup=triage_keyboard(t.id),
+            parse_mode="HTML",
+        )
+    if len(inbox) > WEEKLY_TRIAGE_CAP:
+        await message.reply_text(f"…и ещё {len(inbox) - WEEKLY_TRIAGE_CAP}.")
 
 
 @restricted
@@ -154,6 +240,17 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     text = (message.text or "").strip()
     if not text:
+        return
+
+    # Keyboard presses are commands, not tasks — intercept before capture.
+    if text == BTN_TODAY:
+        await cmd_today(update, context)
+        return
+    if text == BTN_BACKLOG:
+        await cmd_backlog(update, context)
+        return
+    if text == BTN_HELP:
+        await cmd_help(update, context)
         return
 
     # If we asked for a project name for an existing task, consume this reply as that.
