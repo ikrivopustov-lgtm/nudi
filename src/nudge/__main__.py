@@ -17,7 +17,7 @@ from datetime import time as dtime
 
 from .config import get_settings
 from .db import init_db
-from .digest import morning_digest
+from .digest import morning_digest, weekly_ritual
 from .handlers import on_callback, on_text, start
 
 
@@ -44,6 +44,10 @@ def register_jobs(app: Application) -> None:
     tz = settings.tz
     morning = dtime(settings.morning_at.hour, settings.morning_at.minute, tzinfo=tz)
     app.job_queue.run_daily(morning_digest, time=morning, name="morning_digest")
+
+    # PTB v21: days 0-6 = Sunday-Saturday, so Sunday = 0.
+    weekly = dtime(settings.weekly_at.hour, settings.weekly_at.minute, tzinfo=tz)
+    app.job_queue.run_daily(weekly_ritual, time=weekly, days=(0,), name="weekly_ritual")
 
 
 def main() -> None:

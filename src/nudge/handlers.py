@@ -147,3 +147,19 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             context.user_data[_PENDING_PROJECT] = int(parts[1])
         await query.message.reply_text("Напиши название проекта одним сообщением.")
         return
+
+    # --- weekly-ritual triage ---
+    if action == "wk_today" and len(parts) == 2:
+        store.update_task(int(parts[1]), status="today", scheduled_for=local_today())
+        await query.edit_message_text("☀️ → сегодня")
+        return
+
+    if action == "wk_someday" and len(parts) == 2:
+        store.update_task(int(parts[1]), status="someday")
+        await query.edit_message_text("💤 → someday")
+        return
+
+    if action == "wk_del" and len(parts) == 2:
+        store.delete_task(int(parts[1]))
+        await query.edit_message_text("🗑 удалено")
+        return
