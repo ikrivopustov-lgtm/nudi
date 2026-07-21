@@ -124,6 +124,8 @@ def _fallback(text: str, *, today: date) -> dict:
 async def parse_text(text: str, *, today: date | None = None) -> dict:
     """Parse free text into task fields. Never raises; falls back to safe defaults."""
     today = today or date.today()
+    if not get_settings().openrouter_api_key:
+        return _fallback(text, today=today)
     messages = [
         {"role": "system", "content": _PARSE_SYSTEM},
         {"role": "user", "content": text},
@@ -177,6 +179,8 @@ async def parse_edit(text: str, *, today: date | None = None) -> dict:
     'treat this as a new task capture' (the caller should fall through to parse_text).
     """
     today = today or date.today()
+    if not get_settings().openrouter_api_key:
+        return {"action": None, "target_hint": None, "value": None}
     messages = [
         {"role": "system", "content": _EDIT_SYSTEM},
         {"role": "user", "content": f"TODAY={today.isoformat()}\n\n{text}"},
