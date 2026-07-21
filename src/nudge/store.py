@@ -176,16 +176,38 @@ def snapshot(task: Task) -> str:
     return json.dumps(data, ensure_ascii=False)
 
 
-def log_action(kind: str, *, task_id: int | None, before: str | None, summary: str) -> None:
+def next_turn() -> int:
+    """A fresh turn id for one user message, so undo can revert the whole message."""
     with session_scope() as s:
-        s.add(ActionLog(kind=kind, task_id=task_id, before=before, summary=summary))
+        rows = list(s.exec(select(ActionLog.turn).order_by(ActionLog.turn.desc()).limit(1)))
+    return (rows[0] + 1) if rows else 1
 
 
-def last_undoable() -> ActionLog | None:
+def log_action(kind: str, *, task_id: int | None, before: str | None, summary: str, turn: int = 0) -> None:
     with session_scope() as s:
-        return s.exec(
-            select(ActionLog).where(ActionLog.undone == False).order_by(ActionLog.id.desc())  # noqa: E712
-        ).first()
+        s.add(ActionLog(kind=kind, task_id=task_id, before=before, summary=summary, turn=turn))
+
+
+def _last_undoable_turn() -> list[ActionLog]:
+    """All actions of the most recent turn that still has anything to undo, newest first."""
+    with session_scope() as s:
+        turns = list(
+            s.exec(
+                select(ActionLog.turn)
+                .where(ActionLog.undone == False)  # noqa: E712
+                .order_by(ActionLog.turn.desc())
+                .limit(1)
+            )
+        )
+        if not turns:
+            return []
+        return list(
+            s.exec(
+                select(ActionLog)
+                .where(ActionLog.turn == turns[0], ActionLog.undone == False)  # noqa: E712
+                .order_by(ActionLog.id.desc())
+            )
+        )
 
 
 def _mark_undone(log_id: int) -> None:
@@ -206,12 +228,7 @@ def _coerce(field: str, value):
     return value
 
 
-def undo_last() -> str | None:
-    """Reverse the most recent action. Returns a human summary, or None if nothing to undo."""
-    log = last_undoable()
-    if log is None:
-        return None
-
+def _reverse_one(log: ActionLog) -> None:
     if log.kind == "create" and log.task_id is not None:
         delete_task(log.task_id)
     elif log.kind == "delete" and log.before:
@@ -228,9 +245,21 @@ def undo_last() -> str | None:
                 for f in _SNAPSHOT_FIELDS:
                     setattr(task, f, _coerce(f, data.get(f)))
                 s.add(task)
-
     _mark_undone(log.id)
-    return log.summary
+
+
+def undo_last() -> str | None:
+    """Reverse the whole most-recent turn (all its actions). Returns a summary or None."""
+    logs = _last_undoable_turn()
+    if not logs:
+        return None
+    for log in logs:  # newest-first so reversals unwind cleanly
+        _reverse_one(log)
+    # summarise: the primary (oldest) action of the turn, plus a count if several
+    primary = logs[-1].summary
+    if len(logs) > 1:
+        return f"{primary} (и ещё {len(logs) - 1})"
+    return primary
 
 
 # --- Airtable mirroring support -------------------------------------------

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Callable
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
@@ -26,6 +27,14 @@ log = logging.getLogger(__name__)
 _ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 _TIMEOUT = httpx.Timeout(45.0)
 _MAX_STEPS = 6
+
+# Prose that claims an action — used to catch a model that "narrates" a change
+# without actually calling a tool, so we can force it to really do the work.
+_ACTION_CLAIM = re.compile(
+    r"(завёл|завел|созда|добав|удал|перенёс|перенес|поставил|обновил|"
+    r"готово|сделал|закрыл|напомн|повтор|отмен)",
+    re.IGNORECASE,
+)
 
 ScheduleReminder = Callable[[int, datetime], None]
 
@@ -228,13 +237,13 @@ def _clean_status(value) -> str | None:
 
 # --- OpenRouter ------------------------------------------------------------
 
-async def _chat(messages: list[dict]) -> dict:
+async def _chat(messages: list[dict], tool_choice: str = "auto") -> dict:
     settings = get_settings()
     payload = {
         "model": settings.openrouter_model,
         "messages": messages,
         "tools": TOOLS,
-        "tool_choice": "auto",
+        "tool_choice": tool_choice,
         "temperature": 0,
     }
     headers = {"Authorization": f"Bearer {settings.openrouter_api_key}", "X-Title": "nudge"}
@@ -246,11 +255,31 @@ async def _chat(messages: list[dict]) -> dict:
 
 # --- tool executors --------------------------------------------------------
 
+def _fmt_d(d: date) -> str:
+    return d.strftime("%d.%m")
+
+
+def _card(t: Task) -> str:
+    bits = [f"{priority_dot(t.priority)} {t.title}"]
+    if t.project:
+        bits.append(t.project)
+    if t.due_date:
+        bits.append(f"до {_fmt_d(t.due_date)}")
+    if t.scheduled_for:
+        bits.append(f"всплывёт {_fmt_d(t.scheduled_for)}")
+    if t.recurrence:
+        bits.append(f"🔁 {t.recurrence}")
+    return " · ".join(bits)
+
+
 class _Executor:
     def __init__(self, today: date, tz: ZoneInfo, schedule_reminder: ScheduleReminder | None):
         self.today = today
         self.tz = tz
         self.schedule_reminder = schedule_reminder
+        self.actions: list[str] = []  # human-readable, deterministic confirmations
+        self.undo_done = False        # undo is allowed at most once per message
+        self.turn = store.next_turn()  # groups this message's actions for whole-turn undo
 
     def run(self, name: str, args: dict) -> str:
         fn = getattr(self, f"_t_{name}", None)
@@ -284,15 +313,14 @@ class _Executor:
             remind_at=remind_utc.replace(tzinfo=None) if remind_utc else None,
             recurrence=None if rule in (None, "none", "") else rule,
         )
-        store.log_action("create", task_id=task.id, before=None, summary=f"создал «{task.title}»")
+        store.log_action("create", task_id=task.id, before=None, summary=f"создал «{task.title}»", turn=self.turn)
         if remind_utc and self.schedule_reminder:
             self.schedule_reminder(task.id, remind_utc)
-        extra = ""
+        card = _card(task)
         if task.remind_at:
-            extra += f" remind={remind_utc.astimezone(self.tz).isoformat(timespec='minutes')}"
-        if task.recurrence:
-            extra += f" repeat={task.recurrence}"
-        return f"created id={task.id} {priority_dot(task.priority)} {task.title} status={task.status}{extra}"
+            card += f" · ⏰ {remind_utc.astimezone(self.tz).strftime('%d.%m %H:%M')}"
+        self.actions.append(f"✅ Завёл: {card}")
+        return f"created id={task.id} {_card(task)} status={task.status}"
 
     def _t_update_task(self, a: dict) -> str:
         task = store.get_task(int(a["task_id"]))
@@ -325,8 +353,9 @@ class _Executor:
         elif "scheduled_for" in fields and task.status == "today":
             fields["status"] = fields.get("status", "inbox")
         updated = store.update_task(task.id, **fields)
-        store.log_action("update", task_id=task.id, before=before, summary=f"изменил «{updated.title}»")
-        return f"updated id={updated.id} {priority_dot(updated.priority)} {updated.title} status={updated.status}"
+        store.log_action("update", task_id=task.id, before=before, summary=f"изменил «{updated.title}»", turn=self.turn)
+        self.actions.append(f"✏️ Обновил: {_card(updated)}")
+        return f"updated id={updated.id} {_card(updated)} status={updated.status}"
 
     def _t_complete_task(self, a: dict) -> str:
         task = store.get_task(int(a["task_id"]))
@@ -334,9 +363,11 @@ class _Executor:
             return "error: task not found"
         before = store.snapshot(task)
         store.update_task(task.id, status="done", completed_at=datetime.now(timezone.utc))
-        store.log_action("update", task_id=task.id, before=before, summary=f"закрыл «{task.title}»")
+        store.log_action("update", task_id=task.id, before=before, summary=f"закрыл «{task.title}»", turn=self.turn)
         spawned = _spawn_recurrence(task, self.today)
-        extra = f"; создал следующий повтор id={spawned.id}" if spawned else ""
+        note = f" · следующий повтор {_fmt_d(spawned.scheduled_for)}" if spawned and spawned.scheduled_for else ""
+        self.actions.append(f"✔️ Закрыл: {task.title}{note}")
+        extra = f"; spawned next id={spawned.id}" if spawned else ""
         return f"completed id={task.id} «{task.title}»{extra}"
 
     def _t_delete_task(self, a: dict) -> str:
@@ -345,7 +376,8 @@ class _Executor:
             return "error: task not found"
         before = store.snapshot(task)
         store.delete_task(task.id)
-        store.log_action("delete", task_id=task.id, before=before, summary=f"удалил «{task.title}»")
+        store.log_action("delete", task_id=task.id, before=before, summary=f"удалил «{task.title}»", turn=self.turn)
+        self.actions.append(f"🗑 Удалил: {task.title}")
         return f"deleted id={task.id} «{task.title}»"
 
     def _t_set_reminder(self, a: dict) -> str:
@@ -356,10 +388,11 @@ class _Executor:
         before = store.snapshot(task)
         # store naive-UTC so it round-trips consistently through SQLite
         store.update_task(task.id, remind_at=remind_utc.replace(tzinfo=None))
-        store.log_action("update", task_id=task.id, before=before, summary=f"напоминание по «{task.title}»")
+        store.log_action("update", task_id=task.id, before=before, summary=f"напоминание по «{task.title}»", turn=self.turn)
         if self.schedule_reminder:
             self.schedule_reminder(task.id, remind_utc)
         local = remind_utc.astimezone(self.tz)
+        self.actions.append(f"⏰ Напомню {local.strftime('%d.%m %H:%M')}: {task.title}")
         return f"reminder set id={task.id} at {local.isoformat(timespec='minutes')}"
 
     def _t_set_recurrence(self, a: dict) -> str:
@@ -368,8 +401,10 @@ class _Executor:
             return "error: task not found"
         rule = str(a["rule"]).lower().strip()
         before = store.snapshot(task)
-        store.update_task(task.id, recurrence=None if rule in ("none", "") else rule)
-        store.log_action("update", task_id=task.id, before=before, summary=f"повтор «{task.title}»")
+        cleared = rule in ("none", "")
+        store.update_task(task.id, recurrence=None if cleared else rule)
+        store.log_action("update", task_id=task.id, before=before, summary=f"повтор «{task.title}»", turn=self.turn)
+        self.actions.append(f"🔁 {'Снял повтор' if cleared else f'Повтор {rule}'}: {task.title}")
         return f"recurrence id={task.id} -> {rule}"
 
     def _t_search_tasks(self, a: dict) -> str:
@@ -379,8 +414,14 @@ class _Executor:
         return "\n".join(_task_line(t) for t in found[:20])
 
     def _t_undo_last(self, a: dict) -> str:
+        if self.undo_done:  # guard against the model looping undo and over-reverting
+            return "already undone once this turn; do not undo again"
+        self.undo_done = True
         summary = store.undo_last()
-        return f"undone: {summary}" if summary else "nothing to undo"
+        if summary:
+            self.actions.append(f"↩️ Отменил: {summary}")
+            return f"undone: {summary}"
+        return "nothing to undo"
 
 
 # --- recurrence ------------------------------------------------------------
@@ -455,13 +496,14 @@ async def handle_message(
     messages.append({"role": "user", "content": text})
 
     executor = _Executor(today, tz, schedule_reminder)
-    reply = ""
-    try:
+
+    async def _drive(tool_choice: str) -> str:
+        text = ""
         for _ in range(_MAX_STEPS):
-            msg = await _chat(messages)
+            msg = await _chat(messages, tool_choice=tool_choice)
             tool_calls = msg.get("tool_calls")
             if not tool_calls:
-                reply = (msg.get("content") or "").strip()
+                text = (msg.get("content") or "").strip()
                 break
             messages.append(msg)  # assistant turn carrying the tool calls
             for call in tool_calls:
@@ -472,14 +514,34 @@ async def handle_message(
                     args = {}
                 result = executor.run(name, args)
                 messages.append({"role": "tool", "tool_call_id": call["id"], "content": result})
-        else:
-            reply = "Сделал, что смог, но запутался в шагах — проверь список."
+            tool_choice = "auto"  # only the first pass may be forced
+        return text
+
+    try:
+        model_text = await _drive("auto")
+        # Model narrated an action but called no tool -> force it to actually do it.
+        if not executor.actions and _ACTION_CLAIM.search(model_text):
+            messages.append({
+                "role": "system",
+                "content": "Ты описал действие словами, но не вызвал инструмент. "
+                           "Если нужно действие — вызови нужный инструмент сейчас.",
+            })
+            forced = await _drive("required")
+            model_text = forced or model_text
     except Exception as exc:  # noqa: BLE001 — a bad model call must not crash the bot
         log.warning("assistant failed (%s): %s", type(exc).__name__, exc)
         return "Что-то пошло не так с разбором. Попробуй переформулировать."
 
-    if not reply or reply.lower() in {"model", "assistant", "user"}:
-        reply = "Готово."
+    # Confirmations are built from what ACTUALLY happened, not from model prose —
+    # so the bot can never say "готово" without having done anything. Pure Q&A /
+    # clarifications (no tool ran) fall back to the model's own words.
+    if executor.actions:
+        reply = "\n".join(executor.actions)
+    elif model_text and model_text.lower() not in {"model", "assistant", "user"}:
+        reply = model_text
+    else:
+        reply = "Не понял, что сделать — переформулируй?"
+
     store.add_turn("user", text)
     store.add_turn("assistant", reply)
     return reply

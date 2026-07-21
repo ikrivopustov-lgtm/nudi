@@ -49,12 +49,17 @@ def get_engine() -> Engine:
     return _engine
 
 
-# Columns added to Task after the first release. create_all() won't ALTER an
+# Columns added to a table after it first shipped. create_all() won't ALTER an
 # existing table, so we add any missing ones by hand (idempotent).
-_TASK_ADDED_COLUMNS = {
-    "remind_at": "DATETIME",
-    "recurrence": "VARCHAR",
-    "completed_at": "DATETIME",
+_ADDED_COLUMNS = {
+    "task": {
+        "remind_at": "DATETIME",
+        "recurrence": "VARCHAR",
+        "completed_at": "DATETIME",
+    },
+    "actionlog": {
+        "turn": "INTEGER DEFAULT 0",
+    },
 }
 
 
@@ -62,13 +67,15 @@ def _migrate(engine: Engine) -> None:
     from sqlalchemy import inspect, text
 
     insp = inspect(engine)
-    if "task" not in insp.get_table_names():
-        return
-    existing = {c["name"] for c in insp.get_columns("task")}
+    tables = set(insp.get_table_names())
     with engine.begin() as conn:
-        for name, sqltype in _TASK_ADDED_COLUMNS.items():
-            if name not in existing:
-                conn.execute(text(f"ALTER TABLE task ADD COLUMN {name} {sqltype}"))
+        for table, cols in _ADDED_COLUMNS.items():
+            if table not in tables:
+                continue
+            existing = {c["name"] for c in insp.get_columns(table)}
+            for name, sqltype in cols.items():
+                if name not in existing:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {sqltype}"))
 
 
 def init_db() -> None:

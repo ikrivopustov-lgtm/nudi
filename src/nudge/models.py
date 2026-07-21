@@ -68,6 +68,7 @@ class ActionLog(SQLModel, table=True):
     """Reversible action journal powering 'отмени' (undo)."""
 
     id: int | None = Field(default=None, primary_key=True)
+    turn: int = Field(default=0, index=True)   # one user message = one turn; undo reverts a whole turn
     kind: str                      # "create" | "update" | "delete"
     task_id: int | None = None
     before: str | None = None      # JSON snapshot of the task before the action (null for create)
