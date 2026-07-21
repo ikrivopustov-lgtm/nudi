@@ -5,11 +5,17 @@ from __future__ import annotations
 import logging
 import os
 
-from telegram.ext import Application, CommandHandler
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    MessageHandler,
+    filters,
+)
 
 from .config import get_settings
 from .db import init_db
-from .handlers import start
+from .handlers import on_callback, on_text, start
 
 
 def _configure_logging() -> None:
@@ -24,6 +30,8 @@ def build_application() -> Application:
     settings = get_settings()
     app = Application.builder().token(settings.telegram_bot_token).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(on_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     return app
 
 
