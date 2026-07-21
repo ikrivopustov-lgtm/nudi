@@ -1,0 +1,20 @@
+[Unit]
+Description=nudge — personal Telegram task assistant
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust User/paths if you don't run as root.
+User=root
+WorkingDirectory=/root/code/personal/nudge
+EnvironmentFile=/root/code/personal/nudge/.env
+ExecStart=/root/.local/bin/uv run python -m nudge
+Restart=always
+RestartSec=5
+# Small VPS: keep logs in the journal.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
