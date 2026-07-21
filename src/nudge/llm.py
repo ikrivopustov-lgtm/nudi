@@ -32,7 +32,11 @@ _PARSE_SYSTEM = (
     '  "project": a short project/area name or null,\n'
     '  "priority": one of "P1","P2","P3" (P1 = urgent/important, P2 = normal, P3 = low),\n'
     '  "due_date": an ISO date "YYYY-MM-DD" if the message implies a deadline, else null.\n'
-    "Infer language from the message; keep the title in that language. "
+    "Resolve every date against the TODAY value the user gives — including the YEAR. "
+    "A bare day/month like '25 июля' means the next such date on/after TODAY; "
+    "'завтра'/'tomorrow' = TODAY+1; a weekday name = the next such weekday after TODAY. "
+    "Never emit a due_date earlier than TODAY. "
+    "Infer language from the message; keep title AND project in that language. "
     "Do not add commentary. Output must be valid JSON."
 )
 
@@ -50,7 +54,10 @@ _EDIT_SYSTEM = (
     "Examples: 'сделал отчёт' -> done; 'сдвинь звонок на завтра' -> reschedule with "
     "tomorrow's date; 'подними приоритет по налогам' -> priority P1. "
     "If it reads like a brand-new task, set action to null. "
-    "Resolve relative dates against TODAY given by the user. Output valid JSON only."
+    "Keep target_hint in the SAME language and wording as the user's message — "
+    "never translate it; it is matched literally against stored task titles. "
+    "Resolve relative dates against TODAY given by the user, including the YEAR. "
+    "Output valid JSON only."
 )
 
 
@@ -128,7 +135,7 @@ async def parse_text(text: str, *, today: date | None = None) -> dict:
         return _fallback(text, today=today)
     messages = [
         {"role": "system", "content": _PARSE_SYSTEM},
-        {"role": "user", "content": text},
+        {"role": "user", "content": f"TODAY={today.isoformat()}\n\n{text}"},
     ]
     try:
         raw = await _call_openrouter(messages)

@@ -58,10 +58,21 @@ async def test_bad_priority_value_nulls_out(monkeypatch):
     assert out["value"] is None
 
 
-def _mk(title, project=None, tid=1):
-    t = Task(title=title, raw_text=title, iso_week="2026-W30", project=project)
+def _mk(title, project=None, tid=1, raw=None):
+    t = Task(title=title, raw_text=raw or title, iso_week="2026-W30", project=project)
     t.id = tid
     return t
+
+
+def test_resolve_target_survives_russian_inflection(monkeypatch):
+    """'оплатил' must match 'Оплатить', 'звонок' must match 'Позвонить'."""
+    tasks = [
+        _mk("Оплатить налоги", project="Налоги", tid=1, raw="надо срочно оплатить налоги до 25 июля"),
+        _mk("Позвонить в банк по ипотеке", project="Ипотека", tid=2, raw="позвонить в банк по ипотеке завтра"),
+    ]
+    monkeypatch.setattr(handlers.store, "list_active", lambda: tasks)
+    assert handlers.resolve_target("оплатил налоги").id == 1
+    assert handlers.resolve_target("звонок в банк").id == 2
 
 
 def test_resolve_target_matches(monkeypatch):
