@@ -12,7 +12,7 @@ from telegram.ext import ContextTypes
 
 from . import store
 from .config import get_settings
-from .llm import parse_text
+from .llm import parse_edit, parse_text
 from .models import Task
 
 log = logging.getLogger(__name__)
@@ -43,6 +43,56 @@ def restricted(func: Handler) -> Handler:
 
 def local_today() -> date:
     return datetime.now(get_settings().tz).date()
+
+
+def _match_score(hint: str, task: Task) -> float:
+    """Token-overlap score of a hint against a task's title+project."""
+    hay = f"{task.title} {task.project or ''}".lower()
+    tokens = [w for w in hint.lower().split() if len(w) > 2]
+    if not tokens:
+        return 0.0
+    hits = sum(1 for w in tokens if w in hay)
+    return hits / len(tokens)
+
+
+def resolve_target(hint: str | None) -> Task | None:
+    """Best active task matching the hint (score > 0.5), newest wins on ties."""
+    if not hint:
+        return None
+    scored = [(_match_score(hint, t), t) for t in store.list_active()]
+    scored = [(sc, t) for sc, t in scored if sc > 0.5]
+    if not scored:
+        return None
+    scored.sort(key=lambda st: (st[0], st[1].id), reverse=True)
+    return scored[0][1]
+
+
+async def _apply_edit(update: Update, edit: dict) -> bool:
+    """Apply a parsed edit. Returns True if handled (found + applied or reported)."""
+    action = edit["action"]
+    target = resolve_target(edit["target_hint"])
+    message = update.effective_message
+    if target is None:
+        await message.reply_text(
+            f"Не нашёл задачу по «{edit['target_hint'] or '?'}». "
+            "Уточни или пришли как новую."
+        )
+        return True
+
+    if action == "done":
+        store.update_task(target.id, status="done")
+        await message.reply_text(f"✔️ Готово: {target.title}")
+    elif action == "priority":
+        store.update_task(target.id, priority=edit["value"])
+        await message.reply_text(f"Приоритет {edit['value']}: {target.title}")
+    elif action == "reschedule":
+        new_date = edit["value"]
+        fields = {"scheduled_for": new_date}
+        if new_date == local_today():
+            fields["status"] = "today"
+        store.update_task(target.id, **fields)
+        await message.reply_text(f"↪️ Перенёс на {new_date.isoformat()}: {target.title}")
+    return True
 
 
 # --- confirmation rendering ------------------------------------------------
@@ -110,6 +160,15 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await message.reply_text(f"Проект задачи #{task.id}: {task.project}")
         return
 
+    is_forward = message.forward_origin is not None
+
+    # Forwards are always new captures. Plain text may be an edit instruction.
+    if not is_forward:
+        edit = await parse_edit(text, today=local_today())
+        if edit["action"] is not None:
+            await _apply_edit(update, edit)
+            return
+
     parsed = await parse_text(text, today=local_today())
     task = store.create_task(
         title=parsed["title"],
@@ -118,7 +177,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         project=parsed["project"],
         priority=parsed["priority"],
         due_date=parsed["due_date"],
-        source="tg",
+        source="forward" if is_forward else "tg",
     )
     await _send_confirmation(update, task)
 
