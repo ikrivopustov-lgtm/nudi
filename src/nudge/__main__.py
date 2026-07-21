@@ -13,8 +13,11 @@ from telegram.ext import (
     filters,
 )
 
+from datetime import time as dtime
+
 from .config import get_settings
 from .db import init_db
+from .digest import morning_digest
 from .handlers import on_callback, on_text, start
 
 
@@ -32,7 +35,15 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    register_jobs(app)
     return app
+
+
+def register_jobs(app: Application) -> None:
+    settings = get_settings()
+    tz = settings.tz
+    morning = dtime(settings.morning_at.hour, settings.morning_at.minute, tzinfo=tz)
+    app.job_queue.run_daily(morning_digest, time=morning, name="morning_digest")
 
 
 def main() -> None:
