@@ -45,22 +45,26 @@ def local_today() -> date:
     return datetime.now(get_settings().tz).date()
 
 
+_STEM_LEN = 5  # crude stemming: enough to survive Russian/English inflection
+                # ("оплатил"->"оплат" matches "оплатить", "звонок"->"звон" matches "позвонить")
+
+
 def _match_score(hint: str, task: Task) -> float:
-    """Token-overlap score of a hint against a task's title+project."""
-    hay = f"{task.title} {task.project or ''}".lower()
+    """Token-overlap score of a hint against a task's title+project+original text."""
+    hay = f"{task.title} {task.project or ''} {task.raw_text}".lower()
     tokens = [w for w in hint.lower().split() if len(w) > 2]
     if not tokens:
         return 0.0
-    hits = sum(1 for w in tokens if w in hay)
+    hits = sum(1 for w in tokens if w[:_STEM_LEN] in hay)
     return hits / len(tokens)
 
 
 def resolve_target(hint: str | None) -> Task | None:
-    """Best active task matching the hint (score > 0.5), newest wins on ties."""
+    """Best active task matching the hint (score >= 0.5), newest wins on ties."""
     if not hint:
         return None
     scored = [(_match_score(hint, t), t) for t in store.list_active()]
-    scored = [(sc, t) for sc, t in scored if sc > 0.5]
+    scored = [(sc, t) for sc, t in scored if sc >= 0.5]
     if not scored:
         return None
     scored.sort(key=lambda st: (st[0], st[1].id), reverse=True)
