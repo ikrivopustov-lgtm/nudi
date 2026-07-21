@@ -15,6 +15,7 @@ from telegram.ext import (
 
 from datetime import time as dtime
 
+from .airtable_sync import airtable_sync_job, is_configured
 from .config import get_settings
 from .db import init_db
 from .digest import morning_digest, weekly_ritual
@@ -48,6 +49,13 @@ def register_jobs(app: Application) -> None:
     # PTB v21: days 0-6 = Sunday-Saturday, so Sunday = 0.
     weekly = dtime(settings.weekly_at.hour, settings.weekly_at.minute, tzinfo=tz)
     app.job_queue.run_daily(weekly_ritual, time=weekly, days=(0,), name="weekly_ritual")
+
+    if is_configured():
+        app.job_queue.run_repeating(
+            airtable_sync_job, interval=600, first=30, name="airtable_sync"
+        )
+    else:
+        logging.getLogger("nudge").info("Airtable not configured — sync job skipped")
 
 
 def main() -> None:
