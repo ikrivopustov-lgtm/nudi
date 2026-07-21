@@ -16,6 +16,9 @@ inbox, but never wins a conflict.
 | `status`        | str        | **inbox \| today \| done \| someday** (default inbox) |
 | `due_date`      | date \| null | hard deadline                                     |
 | `scheduled_for` | date \| null | day the task is meant to land in "today"          |
+| `remind_at`     | datetime \| null | one-off reminder ping, stored naive-UTC       |
+| `recurrence`    | str \| null | `daily` \| `weekly:mon,thu` \| `monthly:15`        |
+| `completed_at`  | datetime \| null | set when status → done (weekly stats)         |
 | `source`        | str        | **tg \| forward \| airtable**                     |
 | `airtable_id`   | str \| null | record id for mirroring                           |
 | `created_at`    | datetime   | UTC                                               |
@@ -29,6 +32,16 @@ safe default (`priority=P2`, `status=inbox`).
 
 Simple key/value store (`key` PK, `value`) for runtime-tunable settings such as ping times
 or a timezone override, if we ever want to change them without a redeploy.
+
+## `ConvTurn` / `ActionLog`
+
+- **`ConvTurn`** — rolling conversation memory (`role`, `content`, `created_at`), pruned to
+  the last ~24 turns, fed to the assistant so it keeps context across messages and restarts.
+- **`ActionLog`** — reversible action journal (`kind`, `task_id`, `before` JSON snapshot,
+  `summary`, `undone`) powering `отмени`/undo.
+
+New Task columns added after the first release (`remind_at`, `recurrence`, `completed_at`)
+are applied to a pre-existing SQLite table by `db._migrate` (idempotent `ALTER TABLE`).
 
 ## Priority rule — "today ≤ 5"
 

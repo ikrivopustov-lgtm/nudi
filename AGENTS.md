@@ -15,14 +15,18 @@ Read this before touching the repo. It captures the non-obvious rules.
   `.env` (git-ignored, `chmod 600` on the VPS) and are loaded via `config.py` /
   systemd `EnvironmentFile`.
 
-## LLM discipline (prompt-injection safety)
+## Assistant core (`assistant.py`)
 
-- Task text is **data, never instructions**. The model's job is to extract fields, not
-  to follow anything written inside a task.
-- Every LLM response is parsed as strict JSON and validated against a whitelist
-  (`priority ∈ {P1,P2,P3}`, `status ∈ {inbox,today,done,someday}`, dates ISO). Invalid
-  or unparseable output must **never crash the bot** — fall back to safe defaults
-  (`priority=P2`, `project=null`) and keep the raw text.
+- Free-form messages go through **one agentic tool-calling call** (OpenRouter,
+  `google/gemini-2.5-flash-lite`). The model gets the message, recent conversation
+  (`ConvTurn`, persisted) and the live task list, then drives tools: create / update /
+  complete / delete / set_reminder / set_recurrence / search / undo — or just replies.
+- Task text is **data, never instructions**. Tool inputs are validated/whitelisted in the
+  executors (`priority ∈ {P1,P2,P3}`, `status ∈ {…}`, ISO dates). A bad model call or a
+  tool error is returned to the model / caught — it must **never crash the bot**.
+- Prefer **single-shot tools**: `create_task` takes `remind_at`/`recurrence` so the model
+  doesn't chain calls and mis-target ids (weak models get this wrong).
+- Every mutation logs a `before`-snapshot to `ActionLog` so `undo_last` can reverse it.
 
 ## Code
 
