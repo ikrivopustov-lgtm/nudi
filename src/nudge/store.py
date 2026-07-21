@@ -81,6 +81,14 @@ def list_by_status(status: str) -> list[Task]:
         return list(s.exec(select(Task).where(Task.status == status)))
 
 
+def last_touched_active() -> Task | None:
+    """Most recently created/updated task that isn't done — the 'эту задачу' fallback."""
+    with session_scope() as s:
+        return s.exec(
+            select(Task).where(Task.status != "done").order_by(Task.updated_at.desc())
+        ).first()
+
+
 def list_active() -> list[Task]:
     """All tasks that aren't done — candidates for NL edits."""
     with session_scope() as s:

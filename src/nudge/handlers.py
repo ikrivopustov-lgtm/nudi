@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from datetime import date, datetime
 
@@ -17,7 +18,7 @@ from telegram.ext import ContextTypes
 
 from . import store
 from .config import get_settings
-from .llm import parse_edit, parse_text
+from .llm import iso_week_of, parse_edit, parse_text
 from .models import Task
 
 log = logging.getLogger(__name__)
@@ -25,6 +26,7 @@ log = logging.getLogger(__name__)
 Handler = Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]
 
 _PENDING_PROJECT = "await_project_for"  # user_data key: task id awaiting a project name
+_LAST_TASK = "last_task_id"             # user_data key: task the user last touched
 
 # Persistent keyboard. These exact strings are intercepted in on_text BEFORE
 # capture, so pressing a button never creates a task.
@@ -45,8 +47,14 @@ HELP_TEXT = (
     "проект, приоритет и дедлайн. Пересланное сообщение тоже станет задачей.\n\n"
     "<b>Как править — тоже текстом</b>\n"
     "• «сделал налоги» → закрою\n"
-    "• «сдвинь звонок на пятницу» → перенесу\n"
+    "• «сдвинь звонок на пятницу» → перенесу (когда всплывёт)\n"
+    "• «поставь дедлайн на 30 июля» → жёсткий срок\n"
+    "• «давай эту задачу на неделю» → перенесу на +7 дней\n"
     "• «подними приоритет по стоматологу» → сменю приоритет\n\n"
+    "<b>Про «эту задачу»</b>\n"
+    "Можно не называть задачу — скажи «давай на завтра эту задачу», и я возьму "
+    "последнюю, с которой мы работали. Надёжнее всего — <b>ответить реплаем</b> на "
+    "карточку задачи, тогда я точно не промахнусь.\n\n"
     "<b>Команды</b>\n"
     "/today — что делать сегодня (максимум 5)\n"
     "/backlog — разобрать инбокс кнопками\n"
@@ -95,6 +103,36 @@ def _match_score(hint: str, task: Task) -> float:
     return hits / len(tokens)
 
 
+# Deictic references — they point at a task without naming it.
+_DEICTIC = {
+    "эту", "это", "эта", "этой", "этот", "её", "ее", "его", "их", "тут",
+    "задачу", "задача", "задачи", "последнюю", "последняя", "предыдущую",
+    "this", "that", "it", "task", "last", "one",
+}
+
+_TASK_ID_RE = re.compile(r"Задача #(\d+)")
+
+
+def _is_deictic(hint: str | None) -> bool:
+    """True when the hint names no task, just points ('эту задачу', 'её')."""
+    if not hint:
+        return True
+    words = [w.strip(".,!?:;«»\"'") for w in hint.lower().split()]
+    words = [w for w in words if w]
+    return bool(words) and all(w in _DEICTIC for w in words)
+
+
+def target_from_reply(message) -> Task | None:
+    """If the user replied to a task card ('✅ Задача #12: …'), that's the target."""
+    reply = getattr(message, "reply_to_message", None)
+    if reply is None:
+        return None
+    match = _TASK_ID_RE.search(reply.text or reply.caption or "")
+    if not match:
+        return None
+    return store.get_task(int(match.group(1)))
+
+
 def resolve_target(hint: str | None) -> Task | None:
     """Best active task matching the hint (score >= 0.5), newest wins on ties."""
     if not hint:
@@ -107,16 +145,38 @@ def resolve_target(hint: str | None) -> Task | None:
     return scored[0][1]
 
 
-async def _apply_edit(update: Update, edit: dict) -> bool:
+def _pick_target(update: Update, context: ContextTypes.DEFAULT_TYPE, hint: str | None) -> Task | None:
+    """Reply-to beats a pronoun, a pronoun beats fuzzy matching."""
+    # 1. Explicit: user replied to a task card.
+    by_reply = target_from_reply(update.effective_message)
+    if by_reply is not None:
+        return by_reply
+
+    # 2. Deictic ('эту задачу', 'её') -> the task we last touched.
+    if _is_deictic(hint):
+        last_id = (context.user_data or {}).get(_LAST_TASK)
+        if last_id is not None:
+            task = store.get_task(last_id)
+            if task is not None and task.status != "done":
+                return task
+        return store.last_touched_active()
+
+    # 3. Named: fuzzy match on title/project/raw text.
+    return resolve_target(hint)
+
+
+async def _apply_edit(update: Update, context: ContextTypes.DEFAULT_TYPE, edit: dict) -> bool:
     """Apply a parsed edit. Returns True if handled (found + applied or reported)."""
     action = edit["action"]
-    target = resolve_target(edit["target_hint"])
     message = update.effective_message
+    target = _pick_target(update, context, edit["target_hint"])
+
     if target is None:
-        await message.reply_text(
-            f"Не нашёл задачу по «{edit['target_hint'] or '?'}». "
-            "Уточни или пришли как новую."
-        )
+        hint = edit["target_hint"]
+        if _is_deictic(hint):
+            await message.reply_text("Не понял, о какой задаче речь — назови её или ответь на карточку.")
+        else:
+            await message.reply_text(f"Не нашёл задачу по «{hint}». Уточни или пришли как новую.")
         return True
 
     if action == "done":
@@ -127,12 +187,37 @@ async def _apply_edit(update: Update, edit: dict) -> bool:
         await message.reply_text(f"Приоритет {edit['value']}: {target.title}")
     elif action == "reschedule":
         new_date = edit["value"]
-        fields = {"scheduled_for": new_date}
+        fields = {"scheduled_for": new_date, "iso_week": iso_week_of(target.due_date or new_date)}
+        # Moving it to today puts it on today's list; moving it away takes it off.
         if new_date == local_today():
             fields["status"] = "today"
+        elif target.status == "today":
+            fields["status"] = "inbox"
         store.update_task(target.id, **fields)
-        await message.reply_text(f"↪️ Перенёс на {new_date.isoformat()}: {target.title}")
+        await message.reply_text(
+            f"↪️ Перенёс на {_human_date(new_date)}: {target.title}"
+        )
+    elif action == "deadline":
+        due = edit["value"]
+        store.update_task(target.id, due_date=due, iso_week=iso_week_of(due))
+        await message.reply_text(f"⏳ Дедлайн {_human_date(due)}: {target.title}")
+
+    _remember(context, target.id)
     return True
+
+
+def _human_date(d: date) -> str:
+    delta = (d - local_today()).days
+    if delta == 0:
+        return "сегодня"
+    if delta == 1:
+        return "завтра"
+    return d.isoformat()
+
+
+def _remember(context: ContextTypes.DEFAULT_TYPE, task_id: int) -> None:
+    if context.user_data is not None:
+        context.user_data[_LAST_TASK] = task_id
 
 
 # --- confirmation rendering ------------------------------------------------
@@ -267,7 +352,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_forward:
         edit = await parse_edit(text, today=local_today())
         if edit["action"] is not None:
-            await _apply_edit(update, edit)
+            await _apply_edit(update, context, edit)
             return
 
     parsed = await parse_text(text, today=local_today())
@@ -280,6 +365,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         due_date=parsed["due_date"],
         source="forward" if is_forward else "tg",
     )
+    _remember(context, task.id)
     await _send_confirmation(update, task)
 
 
@@ -289,6 +375,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await query.answer()
     parts = (query.data or "").split("|")
     action = parts[0]
+    # Any button press makes that task the referent for a following 'эту задачу'.
+    if len(parts) >= 2 and parts[1].isdigit():
+        _remember(context, int(parts[1]))
 
     if action == "today" and len(parts) == 2:
         task = store.update_task(int(parts[1]), status="today", scheduled_for=local_today())

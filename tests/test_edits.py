@@ -82,6 +82,53 @@ def test_resolve_target_matches(monkeypatch):
     assert hit is not None and hit.id == 1
 
 
+async def test_deadline_intent(monkeypatch):
+    monkeypatch.setattr(llm, "_call_openrouter", _mock({"action": "deadline", "target_hint": "отчёт", "value": "2026-07-30"}))
+    out = await llm.parse_edit("поставь дедлайн по отчёту на 30 июля", today=TODAY)
+    assert out["action"] == "deadline"
+    assert out["value"] == date(2026, 7, 30)
+
+
+async def test_deadline_without_date_is_not_actionable(monkeypatch):
+    monkeypatch.setattr(llm, "_call_openrouter", _mock({"action": "deadline", "target_hint": "x", "value": "скоро"}))
+    out = await llm.parse_edit("поставь дедлайн", today=TODAY)
+    assert out["action"] is None
+
+
+def test_deictic_detection():
+    assert handlers._is_deictic("эту задачу")
+    assert handlers._is_deictic("её")
+    assert handlers._is_deictic("последнюю")
+    assert handlers._is_deictic(None)
+    assert not handlers._is_deictic("оплатить налоги")
+    assert not handlers._is_deictic("эту презентацию")  # names something real
+
+
+def test_target_from_reply(monkeypatch):
+    task = _mk("Оплатить налоги", tid=7)
+    monkeypatch.setattr(handlers.store, "get_task", lambda tid: task if tid == 7 else None)
+
+    class Msg:
+        text = "давай на завтра"
+        reply_to_message = type("R", (), {"text": "✅ Задача #7: Оплатить налоги", "caption": None})()
+
+    assert handlers.target_from_reply(Msg()).id == 7
+
+
+def test_target_from_reply_none_without_card(monkeypatch):
+    class Msg:
+        text = "давай на завтра"
+        reply_to_message = type("R", (), {"text": "просто текст", "caption": None})()
+
+    assert handlers.target_from_reply(Msg()) is None
+
+    class NoReply:
+        text = "давай на завтра"
+        reply_to_message = None
+
+    assert handlers.target_from_reply(NoReply()) is None
+
+
 def test_resolve_target_no_match(monkeypatch):
     tasks = [_mk("Купить молоко", tid=2)]
     monkeypatch.setattr(handlers.store, "list_active", lambda: tasks)
