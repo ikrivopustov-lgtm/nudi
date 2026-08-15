@@ -21,7 +21,7 @@ from .airtable_sync import airtable_sync_job, is_configured
 from .config import get_settings
 from .db import init_db
 from .digest import morning_digest, weekly_ritual
-from .handlers import cmd_backlog, cmd_help, cmd_today, on_callback, on_text, start
+from .handlers import cmd_backlog, cmd_done, cmd_help, cmd_today, on_callback, on_text, start
 
 
 def _configure_logging() -> None:
@@ -37,6 +37,7 @@ async def _post_init(app: Application) -> None:
     await app.bot.set_my_commands(
         [
             BotCommand("today", "Что делать сегодня (максимум 5)"),
+            BotCommand("done", "Что закрыл за неделю"),
             BotCommand("backlog", "Разобрать инбокс"),
             BotCommand("help", "Что я умею"),
             BotCommand("start", "Показать кнопки"),
@@ -66,10 +67,24 @@ def build_application() -> Application:
     )
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("today", cmd_today))
+    app.add_handler(CommandHandler("done", cmd_done))
     app.add_handler(CommandHandler("backlog", cmd_backlog))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CallbackQueryHandler(on_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    # TEXT alone misses forwards of photo/video (caption / media-only).
+    mediaish = (
+        filters.TEXT
+        | filters.CAPTION
+        | filters.PHOTO
+        | filters.VIDEO
+        | filters.ANIMATION
+        | filters.Document.ALL
+        | filters.AUDIO
+        | filters.VOICE
+        | filters.VIDEO_NOTE
+        | filters.Sticker.ALL
+    )
+    app.add_handler(MessageHandler(mediaish & ~filters.COMMAND, on_text))
     register_jobs(app)
     return app
 

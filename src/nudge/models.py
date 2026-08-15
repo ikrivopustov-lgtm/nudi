@@ -2,7 +2,7 @@
 
 Field whitelists (also enforced when validating LLM output):
   priority ∈ {P1, P2, P3}
-  status   ∈ {inbox, today, done, someday}
+  status   ∈ {inbox, today, done}  # legacy "someday" is migrated to inbox on init
   source   ∈ {tg, forward, airtable}
 """
 
@@ -36,7 +36,7 @@ class Task(SQLModel, table=True):
     project: str | None = Field(default=None, index=True)
     iso_week: str = Field(index=True)          # e.g. "2026-W30"
     priority: str = Field(default="P2", index=True)   # P1 | P2 | P3
-    status: str = Field(default="inbox", index=True)  # inbox | today | done | someday
+    status: str = Field(default="inbox", index=True)  # inbox | today | done
     due_date: date | None = None
     scheduled_for: date | None = None          # day it lands in "today"
     remind_at: datetime | None = None          # one-off reminder ping (UTC)

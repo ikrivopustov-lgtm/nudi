@@ -1,16 +1,19 @@
-"""choose() — the rule of 5."""
+"""choose() — the rule of 5 (no silent inbox top-up)."""
 
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 
+from nudge import store
+from nudge.db import init_db
+from nudge.llm import iso_week_of
 from nudge.models import Task
-from nudge.priority import LIMIT, choose
+from nudge.priority import LIMIT, choose, materialize_today, select_today
 
 TODAY = date(2026, 7, 21)
 
 
-def mk(title, *, status="inbox", priority="P2", due=None, created_offset=0):
+def mk(title, *, status="inbox", priority="P2", due=None, scheduled_for=None, created_offset=0):
     return Task(
         title=title,
         raw_text=title,
@@ -18,6 +21,7 @@ def mk(title, *, status="inbox", priority="P2", due=None, created_offset=0):
         status=status,
         priority=priority,
         due_date=due,
+        scheduled_for=scheduled_for,
         created_at=datetime(2026, 7, 1, tzinfo=timezone.utc) + timedelta(hours=created_offset),
     )
 
@@ -35,19 +39,13 @@ def test_overdue_included_even_from_inbox():
 
 def test_done_excluded():
     tasks = [mk("done-today", status="today"), mk("d", status="done")]
-    # A done task must never appear, even if it were 'today' earlier.
     out = choose(tasks, TODAY)
     assert all(t.status != "done" for t in out)
     assert [t.title for t in out] == ["done-today"]
 
 
-def test_someday_not_topped_up():
-    tasks = [mk("later", status="someday", priority="P1")]
-    assert choose(tasks, TODAY) == []
-
-
-def test_topup_prefers_higher_priority():
-    # 6 inbox tasks, none 'today'/overdue -> top-up must pick the 5 by priority.
+def test_undated_inbox_not_auto_pulled():
+    """Capture stays in backlog — no silent top-up into today."""
     tasks = [
         mk("p3-a", priority="P3"),
         mk("p1-a", priority="P1"),
@@ -57,11 +55,7 @@ def test_topup_prefers_higher_priority():
         mk("p2-b", priority="P2"),
     ]
     out = choose(tasks, TODAY)
-    assert len(out) == LIMIT
-    titles = {t.title for t in out}
-    # both P1 and both P2 must be in; exactly one P3 dropped.
-    assert {"p1-a", "p1-b", "p2-a", "p2-b"} <= titles
-    assert len([t for t in out if t.priority == "P3"]) == 1
+    assert out == []
 
 
 def test_overdue_sorted_first():
@@ -71,3 +65,56 @@ def test_overdue_sorted_first():
     ]
     out = choose(tasks, TODAY)
     assert out[0].title == "overdue"  # overdue outranks even a P1 'today'
+
+
+def test_future_scheduled_not_in_today_after_reschedule():
+    """Regression: moved to Tuesday must not reappear in /today."""
+    tasks = [
+        mk("stay", status="today"),
+        mk(
+            "moved",
+            status="inbox",
+            priority="P1",
+            scheduled_for=TODAY + timedelta(days=2),
+        ),
+    ]
+    out = choose(tasks, TODAY)
+    assert [t.title for t in out] == ["stay"]
+
+
+def test_scheduled_for_today_included_even_if_inbox():
+    tasks = [
+        mk("later", status="inbox", scheduled_for=TODAY + timedelta(days=3)),
+        mk("due-today", status="inbox", scheduled_for=TODAY, priority="P3"),
+    ]
+    out = choose(tasks, TODAY)
+    assert [t.title for t in out] == ["due-today"]
+
+
+def test_materialize_promotes_inbox_scheduled_today():
+    init_db()
+    t = store.create_task(
+        title="Всплыла",
+        raw_text="Всплыла",
+        iso_week=iso_week_of(TODAY),
+        status="inbox",
+        scheduled_for=TODAY,
+    )
+    chosen = select_today(TODAY, materialize=True)
+    assert any(x.id == t.id for x in chosen)
+    assert store.get_task(t.id).status == "today"
+    assert t.id not in {x.id for x in store.list_by_status("inbox")}
+
+
+def test_materialize_promotes_overdue():
+    init_db()
+    t = store.create_task(
+        title="Просрочка",
+        raw_text="Просрочка",
+        iso_week=iso_week_of(TODAY),
+        status="inbox",
+        due_date=TODAY - timedelta(days=1),
+    )
+    n = materialize_today(choose(store.list_active(), TODAY))
+    assert n == 1
+    assert store.get_task(t.id).status == "today"

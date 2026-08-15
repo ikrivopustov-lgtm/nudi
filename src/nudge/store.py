@@ -120,9 +120,39 @@ def search_tasks(query: str, *, include_done: bool = False) -> list[Task]:
 
 
 def completed_since(since: datetime) -> list[Task]:
+    since_naive = since.replace(tzinfo=None) if since.tzinfo else since
     with session_scope() as s:
         return list(
-            s.exec(select(Task).where(Task.completed_at.is_not(None), Task.completed_at >= since))
+            s.exec(
+                select(Task)
+                .where(Task.completed_at.is_not(None), Task.completed_at >= since_naive)
+                .order_by(Task.completed_at.desc())
+            )
+        )
+
+
+def list_completed_between(
+    since: datetime,
+    until: datetime | None = None,
+) -> list[Task]:
+    """Tasks closed in [since, until). until defaults to now (UTC, naive)."""
+    since_naive = since.replace(tzinfo=None) if since.tzinfo else since
+    until_naive = (
+        until.replace(tzinfo=None)
+        if until and until.tzinfo
+        else (until or datetime.now(timezone.utc).replace(tzinfo=None))
+    )
+    with session_scope() as s:
+        return list(
+            s.exec(
+                select(Task)
+                .where(
+                    Task.completed_at.is_not(None),
+                    Task.completed_at >= since_naive,
+                    Task.completed_at < until_naive,
+                )
+                .order_by(Task.completed_at.desc())
+            )
         )
 
 

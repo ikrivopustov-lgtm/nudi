@@ -49,6 +49,17 @@ def get_engine() -> Engine:
     return _engine
 
 
+def reset_engine() -> None:
+    """Drop the cached engine so the next get_engine() picks up DATABASE_PATH.
+
+    Used by tests that point at a fresh temp DB.
+    """
+    global _engine
+    if _engine is not None:
+        _engine.dispose()
+        _engine = None
+
+
 # Columns added to a table after it first shipped. create_all() won't ALTER an
 # existing table, so we add any missing ones by hand (idempotent).
 _ADDED_COLUMNS = {
@@ -83,6 +94,11 @@ def init_db() -> None:
     engine = get_engine()
     _migrate(engine)  # add columns to a pre-existing task table before create_all
     SQLModel.metadata.create_all(engine)
+    # someday removed from product: park legacy rows in backlog (inbox).
+    from sqlalchemy import text
+
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE task SET status='inbox' WHERE status='someday'"))
 
 
 @contextmanager

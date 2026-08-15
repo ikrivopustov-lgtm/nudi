@@ -1,0 +1,19 @@
+{
+  "id": "7123456789012345678",
+  "text": "Как быстро настроить личный архив закладок #productivity #tips",
+  "createTimeISO": "2026-01-15T12:00:00.000Z",
+  "webVideoUrl": "https://www.tiktok.com/@demo/video/7123456789012345678",
+  "authorMeta": {
+    "name": "demo",
+    "nickName": "Demo User"
+  },
+  "hashtags": [
+    {"name": "productivity"},
+    {"name": "tips"}
+  ],
+  "videoMeta": {
+    "transcript": "Сегодня покажу три шага: сохранить ссылку, добавить теги и искать по смыслу."
+  },
+  "diggCount": 10,
+  "playCount": 100
+}

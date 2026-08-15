@@ -1,8 +1,10 @@
 [project]
 name = "nudge"
 version = "0.1.0"
-description = "Personal Telegram task assistant — one inbox, a short list (rule of 5), external nudges."
+description = "Nudi — personal Telegram assistant. Talk like a human. Stay at five tasks."
 readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Ilya Krivopustov" }]
 requires-python = ">=3.12"
 dependencies = [
     "python-telegram-bot[job-queue]==21.*",
@@ -31,3 +33,6 @@ packages = ["src/nudge"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "integration: hits live Apify/Karakeep (skipped without tokens)",
+]

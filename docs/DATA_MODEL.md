@@ -13,12 +13,12 @@ inbox, but never wins a conflict.
 | `project`       | str \| null | parsed project, nullable                          |
 | `iso_week`      | str        | ISO week the task belongs to, e.g. `2026-W30`     |
 | `priority`      | str        | **P1 \| P2 \| P3** (default P2)                    |
-| `status`        | str        | **inbox \| today \| done \| someday** (default inbox) |
+| `status`        | str        | **inbox \| today \| done** (default inbox). Legacy `someday` migrates to inbox. |
 | `due_date`      | date \| null | hard deadline                                     |
 | `scheduled_for` | date \| null | day the task is meant to land in "today"          |
 | `remind_at`     | datetime \| null | one-off reminder ping, stored naive-UTC       |
 | `recurrence`    | str \| null | `daily` \| `weekly:mon,thu` \| `monthly:15`        |
-| `completed_at`  | datetime \| null | set when status → done (weekly stats)         |
+| `completed_at`  | datetime \| null | set when status → done; **never purged** — history is permanent |
 | `source`        | str        | **tg \| forward \| airtable**                     |
 | `airtable_id`   | str \| null | record id for mirroring                           |
 | `created_at`    | datetime   | UTC                                               |
@@ -45,15 +45,20 @@ are applied to a pre-existing SQLite table by `db._migrate` (idempotent `ALTER T
 
 ## Priority rule — "today ≤ 5"
 
-The morning digest selects at most **5** tasks:
+The morning digest / `/today` selects at most **5** commitments:
 
 1. all tasks with `status = today`, **plus**
-2. all overdue tasks (`due_date < today` and not `done`), **plus**
-3. top-up by priority **P1 → P2 → P3** until we reach 5.
+2. all with `scheduled_for = today`, **plus**
+3. all overdue tasks (`due_date < today` and not `done`).
 
-Ordering within the set: overdue first, then by priority, then by `due_date` (nulls last),
-then by `created_at`. The list is hard-capped at 5 — anything beyond stays hidden until the
-list frees up. That cap *is* the product.
+There is **no silent top-up** from undated inbox. New captures stay in backlog until
+the user says «на сегодня», presses triage «☀️ Сегодня», or the scheduled day arrives.
+
+On read, `materialize_today` promotes inbox items that are already in the selection
+(`scheduled_for = today` or overdue) to `status = today`, so they leave the backlog
+(one place at a time).
+
+Tasks with `scheduled_for > today` stay in the backlog until that day.
 
 ## Storage
 

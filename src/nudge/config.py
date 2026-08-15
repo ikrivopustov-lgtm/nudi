@@ -23,7 +23,8 @@ class Settings(BaseSettings):
 
     # OpenRouter
     openrouter_api_key: str = ""
-    openrouter_model: str = "google/gemini-2.5-flash"
+    openrouter_model: str = "google/gemini-2.5-flash-lite"
+    openrouter_fallback_model: str = "google/gemini-2.5-flash"
 
     # Airtable
     airtable_token: str = ""
@@ -39,6 +40,11 @@ class Settings(BaseSettings):
 
     # Storage
     database_path: str = "data/nudge.db"
+
+    # Personal archive (Karakeep + optional Apify enrich)
+    karakeep_api_url: str = "http://127.0.0.1:3000"
+    karakeep_api_key: str = ""
+    apify_token: str = ""
 
     @property
     def tz(self) -> ZoneInfo:

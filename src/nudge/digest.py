@@ -15,6 +15,8 @@ from .priority import select_today
 
 WEEKLY_TRIAGE_CAP = 12  # don't spam more than this many inbox items at once
 
+_WEEKDAYS_RU = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
+
 log = logging.getLogger(__name__)
 
 
@@ -24,6 +26,31 @@ def _local_today() -> date:
 
 def _esc(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def format_scheduled(d: date) -> str:
+    """Human date for backlog: «вт 28.07»."""
+    return f"{_WEEKDAYS_RU[d.weekday()]} {d.strftime('%d.%m')}"
+
+
+def split_inbox(tasks: list[Task]) -> tuple[list[Task], list[Task]]:
+    """Split backlog into (dated by scheduled_for ASC, undated newest-first)."""
+    dated = [t for t in tasks if t.scheduled_for is not None]
+    undated = [t for t in tasks if t.scheduled_for is None]
+    dated.sort(key=lambda t: t.scheduled_for or date.max)
+    undated.sort(
+        key=lambda t: t.updated_at or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+    return dated, undated
+
+
+def task_line_html(t: Task, *, show_schedule: bool = True) -> str:
+    proj = f" · {_esc(t.project)}" if t.project else ""
+    when = ""
+    if show_schedule and t.scheduled_for:
+        when = f" · 📅 {format_scheduled(t.scheduled_for)}"
+    return f"{priority_dot(t.priority)} {_esc(t.title)}{proj}{when}"
 
 
 def render_digest(tasks: list[Task], today: date) -> str:
@@ -59,7 +86,6 @@ def triage_keyboard(task_id: int) -> InlineKeyboardMarkup:
         [
             [
                 InlineKeyboardButton("☀️ Сегодня", callback_data=f"wk_today|{task_id}"),
-                InlineKeyboardButton("💤 Someday", callback_data=f"wk_someday|{task_id}"),
                 InlineKeyboardButton("🗑", callback_data=f"wk_del|{task_id}"),
             ]
         ]
@@ -100,26 +126,40 @@ async def weekly_ritual(context: ContextTypes.DEFAULT_TYPE) -> None:
     if not inbox:
         await context.bot.send_message(
             chat_id=chat_id,
-            text=f"🧹 Еженедельный разбор: инбокс пуст. Чисто.\n{stats}",
+            text=f"🧹 Еженедельный разбор: бэклог пуст. Чисто.\n{stats}",
         )
         return
 
+    dated, undated = split_inbox(inbox)
     await context.bot.send_message(
         chat_id=chat_id,
-        text=f"🧹 <b>Еженедельный разбор</b>\n{stats}\nВ инбоксе задач: {len(inbox)}. Разложим:",
+        text=(
+            f"🧹 <b>Еженедельный разбор</b>\n{stats}\n"
+            f"Бэклог: {len(inbox)} · без даты {len(undated)} · на дату {len(dated)}. "
+            f"Сначала без даты:"
+        ),
         parse_mode="HTML",
     )
-    for t in inbox[:WEEKLY_TRIAGE_CAP]:
-        proj = f" · {_esc(t.project)}" if t.project else ""
+    # Ritual focuses on undated triage; dated already have a day.
+    for t in undated[:WEEKLY_TRIAGE_CAP]:
         await context.bot.send_message(
             chat_id=chat_id,
-            text=f"{priority_dot(t.priority)} {_esc(t.title)}{proj}",
+            text=task_line_html(t, show_schedule=False),
             reply_markup=triage_keyboard(t.id),
             parse_mode="HTML",
         )
-    if len(inbox) > WEEKLY_TRIAGE_CAP:
+    if len(undated) > WEEKLY_TRIAGE_CAP:
         await context.bot.send_message(
             chat_id=chat_id,
-            text=f"…и ещё {len(inbox) - WEEKLY_TRIAGE_CAP}. Разберём в следующий раз.",
+            text=f"…и ещё {len(undated) - WEEKLY_TRIAGE_CAP} без даты.",
         )
-    log.info("weekly ritual sent (%d inbox tasks)", len(inbox))
+    if dated:
+        lines = ["📅 Уже на дату (просто напоминаю):"]
+        for t in dated[:8]:
+            lines.append(f"• {task_line_html(t, show_schedule=True)}")
+        if len(dated) > 8:
+            lines.append(f"…и ещё {len(dated) - 8}.")
+        await context.bot.send_message(
+            chat_id=chat_id, text="\n".join(lines), parse_mode="HTML"
+        )
+    log.info("weekly ritual sent (%d inbox, %d undated)", len(inbox), len(undated))
