@@ -1,57 +1,104 @@
-# nudge
+<p align="center">
+  <img src="docs/assets/logo.png" width="168" alt="Nudi" />
+</p>
 
-Personal Telegram task assistant. One inbox (text to a bot), a short list (rule of 5),
-external nudges as the trigger. SQLite is the single source of truth; Airtable is a second
-door and a mirror; OpenRouter parses and prioritizes. Runs 24/7 on a VPS via systemd.
+<h1 align="center">Nudi</h1>
 
-## What it does
+<p align="center">
+  Personal Telegram assistant.<br />
+  Talk like a human. Stay at five tasks. Keep links out of the to-do list.
+</p>
 
-- **Capture** — any text (or a forwarded message) in the bot becomes a task. An LLM parses
-  it into `title / project / priority / due_date / iso_week`; you confirm/adjust with
-  inline buttons.
-- **Rule of 5** — the morning digest shows at most 5 things: `today` + overdue + top
-  priority, sliced to 5.
-- **Nudges** — morning digest, a Sunday weekly triage ritual, deadline pings — all via the
-  bot's `JobQueue` (APScheduler). No Celery, no Redis.
-- **Second door** — Airtable inbox view is polled every 10 min; task changes are mirrored
-  back out.
+<p align="center">
+  <img alt="Python 3.12" src="https://img.shields.io/badge/python-3.12-07133d?style=flat-square" />
+  <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-c7ff62?style=flat-square&labelColor=07133d" />
+  <img alt="One user" src="https://img.shields.io/badge/users-1-0a2bff?style=flat-square&labelColor=07133d" />
+</p>
+
+<p align="center">
+  <img src="docs/assets/banner.png" alt="Пиши как другу. Задачи в чате, ссылки в архиве, сегодня не больше пяти." />
+</p>
+
+Self-hosted. One Telegram user. One SQLite file. No Docker inside the bot process.
+
+The Python package is still `nudge` (`uv run python -m nudge`). **Nudi** is the name you see in chat.
+
+## How it works
+
+You write in Telegram the way you think. Nudi splits the world into **two boxes**:
+
+| You send | Where it goes |
+| --- | --- |
+| Plain text (`оплатить налоги`) | Tasks (SQLite) |
+| «сделал налоги», `налоги ✓` | Closes a task — instantly, no model wait |
+| Forwarded post, http(s) link, Reel, TikTok | Archive ([Karakeep](https://github.com/karakeep-app/karakeep)) |
+| Button **📎 Сохранить**, then the next message | Archive |
+
+Today is a **short list**: at most five. Inbox waits. Nothing is silently pulled in.
+
+<p align="center">
+  <img src="docs/assets/how-it-works.png" alt="Один чат. Две коробки — задачи и архив." />
+</p>
+
+<p align="center">
+  <img src="docs/assets/chats.png" alt="Четыре экрана: завести задачу, сегодня из пяти, закрыть галочкой, сохранить рилс в архив." />
+</p>
+
+Keyboard: **Сегодня** · **Бэклог** · **Сделано** · **Сохранить** · **Помощь**. After you change it, send `/start` once.
+
+## What you can say
+
+- **Capture** — `оплатить налоги до пятницы`, `напомни про звонок сегодня в 15:00`
+- **Close** — `сделал налоги`, `налоги ✓`, `готово` (or quote a `/today` line → `сделано`)
+- **Move** — `на пятницу`, `на след неделю`, `отложи` (no date → inbox)
+- **History** — `что сделал за неделю?` or `/done` (week pager ← →). Completed tasks are never purged.
+- **Undo** — `отмени` rolls back the last turn.
+
+Harder messages go through one OpenRouter tool-calling call (`gemini-2.5-flash-lite`, fallback `flash`). Phrases like «сделал X» never wait on the model.
 
 ## Stack
 
-Python 3.12 · `python-telegram-bot` v21 (long-polling + JobQueue) · SQLite (WAL) via
-SQLModel · OpenRouter over `httpx` · `pyairtable` · `pydantic-settings` · `uv`.
+Python 3.12 · `python-telegram-bot` v21 · SQLite (WAL) · OpenRouter · optional [Karakeep](https://github.com/karakeep-app/karakeep) · optional Apify (TikTok/Reels transcript) · optional Airtable mirror.
 
-No Docker. Single process + one SQLite file. One user (allowlist by Telegram id).
+SQLite always wins. Airtable is a second inbox, never the source of truth.
+
+```
+Telegram
+   │
+   ├─ archive route  →  Karakeep  (links, forwards, reels)
+   ├─ fast path      →  complete / history / inbox   (no LLM)
+   └─ assistant      →  OpenRouter tools → SQLite
+```
 
 ## Run
 
 ```bash
-uv sync                     # install
-cp .env.example .env        # then fill in real values
-uv run python -m nudge      # start the bot + scheduler
-uv run pytest               # tests
+uv sync
+cp .env.example .env   # Telegram token, your user id, OpenRouter key
+uv run python -m nudge
+uv run pytest
 ```
+
+Required: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USER_ID`, `OPENROUTER_API_KEY`.  
+Optional: `KARAKEEP_API_URL` + `KARAKEEP_API_KEY`, `APIFY_TOKEN`, Airtable.
+
+This is a **single-user** bot. Anyone else who messages it is logged and dropped.
+
+Deploy is one systemd unit (`scripts/nudge.service`) and `scripts/deploy.sh`. Edit the paths — the checked-in unit is an example for a small VPS.
 
 ## Layout
 
 ```
 src/nudge/
-  __main__.py     entry point: start bot + JobQueue
-  config.py       pydantic-settings from .env
-  db.py           engine, WAL, init, sessions
-  models.py       SQLModel: Task, Setting
-  llm.py          OpenRouter: parse_text / parse_edit → strict JSON
-  handlers.py     text, forwards, edits, inline buttons
-  priority.py     "today ≤ 5" selection + ordering
-  digest.py       morning digest + weekly ritual
-  airtable_sync.py  poll-in + mirror-out
-scripts/          systemd unit, deploy.sh, backup_db.sh
-docs/             PROJECT_KICKOFF.md, DATA_MODEL.md
+  assistant.py    OpenRouter agent + tools
+  fastpath.py     instant complete / history / inbox
+  archive/        Karakeep + Apify enrich + routing
+  handlers.py     Telegram commands + keyboard
+  store.py        CRUD / undo / completed history
+  priority.py     today ≤ 5
+  digest.py       morning list + Sunday backlog
 ```
 
-## Deploy (VPS)
+## License
 
-The app runs under systemd (`scripts/nudge.service`). See `scripts/deploy.sh` for the
-rsync + restart flow and `scripts/backup_db.sh` for the daily SQLite backup.
-
-Secrets live only in `.env` on the server (`chmod 600`), never in git.
+[MIT](LICENSE) © 2026 Ilya Krivopustov
