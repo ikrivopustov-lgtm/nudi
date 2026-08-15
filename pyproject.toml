@@ -1,7 +1,7 @@
 [project]
 name = "nudge"
 version = "0.1.0"
-description = "Nudi — personal Telegram assistant. Talk like a human. Stay at five tasks."
+description = "Nudi — личный ассистент в Telegram. Пишешь как другу. Сегодня не больше пяти дел."
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Ilya Krivopustov" }]
